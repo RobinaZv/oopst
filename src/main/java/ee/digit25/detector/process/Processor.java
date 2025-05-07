@@ -9,32 +9,75 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
+import java.time.Duration;
+import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.stream.Collectors;
 
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class Processor {
 
-    private final int TRANSACTION_BATCH_SIZE = 10;
+    private final int TRANSACTION_BATCH_SIZE = 50;
     private final TransactionRequester requester;
     private final TransactionValidator validator;
     private final TransactionVerifier verifier;
+    
+    private long totalTransactionsProcessed = 0;
+    private long totalProcessingTime = 0;
 
-    @Scheduled(fixedDelay = 1000) //Runs every 1000 ms after the last run
+    @Scheduled(fixedDelay = 1000)
     public void process() {
+        Instant start = Instant.now();
         log.info("Starting to process a batch of transactions of size {}", TRANSACTION_BATCH_SIZE);
 
         List<Transaction> transactions = requester.getUnverified(TRANSACTION_BATCH_SIZE);
+        
+        // Process transactions in parallel
+        List<CompletableFuture<Map.Entry<Boolean, Transaction>>> validationFutures = 
+            transactions.stream()
+                .map(transaction -> CompletableFuture.supplyAsync(() -> 
+                    Map.entry(validator.isLegitimate(transaction), transaction)))
+                .collect(Collectors.toList());
 
-        for (Transaction transaction : transactions) {
-            if (validator.isLegitimate(transaction)) {
-                log.info("Legitimate transaction {}", transaction.getId());
-                verifier.verify(transaction);
-            } else {
-                log.info("Not legitimate transaction {}", transaction.getId());
-                verifier.reject(transaction);
-            }
+        // Wait for all validations to complete
+        List<Map.Entry<Boolean, Transaction>> results = validationFutures.stream()
+            .map(CompletableFuture::join)
+            .collect(Collectors.toList());
+
+        // Group transactions by validation result
+        Map<Boolean, List<Transaction>> groupedTransactions = results.stream()
+            .collect(Collectors.groupingBy(
+                Map.Entry::getKey,
+                Collectors.mapping(Map.Entry::getValue, Collectors.toList())
+            ));
+
+        // Bulk verify/reject transactions
+        List<Transaction> legitimateTransactions = groupedTransactions.getOrDefault(true, new ArrayList<>());
+        List<Transaction> rejectedTransactions = groupedTransactions.getOrDefault(false, new ArrayList<>());
+
+        if (!legitimateTransactions.isEmpty()) {
+            log.info("Bulk verifying {} legitimate transactions", legitimateTransactions.size());
+            verifier.verify(legitimateTransactions);
         }
+
+        if (!rejectedTransactions.isEmpty()) {
+            log.info("Bulk rejecting {} transactions", rejectedTransactions.size());
+            verifier.reject(rejectedTransactions);
+        }
+
+        // Update performance metrics
+        totalTransactionsProcessed += transactions.size();
+        Duration processingTime = Duration.between(start, Instant.now());
+        totalProcessingTime += processingTime.toMillis();
+        
+        // Log performance metrics
+        log.info("Batch processed in {} ms. Average processing time: {} ms per transaction",
+            processingTime.toMillis(),
+            totalTransactionsProcessed > 0 ? totalProcessingTime / totalTransactionsProcessed : 0);
     }
 }
