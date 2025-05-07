@@ -9,12 +9,9 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
-import java.time.Duration;
-import java.time.Instant;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.CompletableFuture;
+import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
 @Slf4j
@@ -22,62 +19,50 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 public class Processor {
 
-    private final int TRANSACTION_BATCH_SIZE = 50;
+    private static final int TRANSACTION_BATCH_SIZE = 50;
     private final TransactionRequester requester;
     private final TransactionValidator validator;
     private final TransactionVerifier verifier;
-    
-    private long totalTransactionsProcessed = 0;
-    private long totalProcessingTime = 0;
 
     @Scheduled(fixedDelay = 1000)
     public void process() {
-        Instant start = Instant.now();
-        log.info("Starting to process a batch of transactions of size {}", TRANSACTION_BATCH_SIZE);
+        if (log.isInfoEnabled()) {
+            log.info("Starting to process a batch of transactions of size {}", TRANSACTION_BATCH_SIZE);
+        }
 
         List<Transaction> transactions = requester.getUnverified(TRANSACTION_BATCH_SIZE);
         
-        // Process transactions in parallel
-        List<CompletableFuture<Map.Entry<Boolean, Transaction>>> validationFutures = 
-            transactions.stream()
-                .map(transaction -> CompletableFuture.supplyAsync(() -> 
-                    Map.entry(validator.isLegitimate(transaction), transaction)))
-                .collect(Collectors.toList());
+        if (transactions.isEmpty()) {
+            return;
+        }
 
-        // Wait for all validations to complete
-        List<Map.Entry<Boolean, Transaction>> results = validationFutures.stream()
-            .map(CompletableFuture::join)
-            .collect(Collectors.toList());
+        // Parallel processing for better performance with larger batches
+        Map<Boolean, List<Transaction>> groupedTransactions = transactions.parallelStream()
+            .collect(Collectors.partitioningBy(validator::isLegitimate));
 
-        // Group transactions by validation result
-        Map<Boolean, List<Transaction>> groupedTransactions = results.stream()
-            .collect(Collectors.groupingBy(
-                Map.Entry::getKey,
-                Collectors.mapping(Map.Entry::getValue, Collectors.toList())
-            ));
+        processTransactionGroups(groupedTransactions);
+    }
 
-        // Bulk verify/reject transactions
-        List<Transaction> legitimateTransactions = groupedTransactions.getOrDefault(true, new ArrayList<>());
-        List<Transaction> rejectedTransactions = groupedTransactions.getOrDefault(false, new ArrayList<>());
+    private void processTransactionGroups(Map<Boolean, List<Transaction>> groupedTransactions) {
+        List<Transaction> legitimateTransactions = groupedTransactions.get(true);
+        List<Transaction> rejectedTransactions = groupedTransactions.get(false);
 
-        if (!legitimateTransactions.isEmpty()) {
-            log.info("Bulk verifying {} legitimate transactions", legitimateTransactions.size());
+        // Process legitimate transactions asynchronously if supported by verifier
+        if (legitimateTransactions != null && !legitimateTransactions.isEmpty()) {
+            logBatchSize("Bulk verifying {} legitimate transactions", legitimateTransactions.size());
             verifier.verify(legitimateTransactions);
         }
 
-        if (!rejectedTransactions.isEmpty()) {
-            log.info("Bulk rejecting {} transactions", rejectedTransactions.size());
+        // Process rejected transactions
+        if (rejectedTransactions != null && !rejectedTransactions.isEmpty()) {
+            logBatchSize("Bulk rejecting {} transactions", rejectedTransactions.size());
             verifier.reject(rejectedTransactions);
         }
+    }
 
-        // Update performance metrics
-        totalTransactionsProcessed += transactions.size();
-        Duration processingTime = Duration.between(start, Instant.now());
-        totalProcessingTime += processingTime.toMillis();
-        
-        // Log performance metrics
-        log.info("Batch processed in {} ms. Average processing time: {} ms per transaction",
-            processingTime.toMillis(),
-            totalTransactionsProcessed > 0 ? totalProcessingTime / totalTransactionsProcessed : 0);
+    private void logBatchSize(String message, int size) {
+        if (log.isInfoEnabled()) {
+            log.info(message, size);
+        }
     }
 }

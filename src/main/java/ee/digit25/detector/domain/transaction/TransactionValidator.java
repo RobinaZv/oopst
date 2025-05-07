@@ -18,14 +18,35 @@ public class TransactionValidator {
     private final AccountValidator accountValidator;
 
     public boolean isLegitimate(Transaction transaction) {
-        boolean isLegitimate = true;
+        // Quick checks first
+        if (!deviceValidator.isValid(transaction.getDeviceMac())) {
+            log.info("Invalid device for transaction {}", transaction.getId());
+            return false;
+        }
 
-        isLegitimate &= personValidator.isValid(transaction.getRecipient());
-        isLegitimate &= personValidator.isValid(transaction.getSender());
-        isLegitimate &= deviceValidator.isValid(transaction.getDeviceMac());
-        isLegitimate &= accountValidator.isValidSenderAccount(transaction.getSenderAccount(), transaction.getAmount(), transaction.getSender());
-        isLegitimate &= accountValidator.isValidRecipientAccount(transaction.getRecipientAccount(), transaction.getRecipient());
+        if (!personValidator.isValid(transaction.getSender())) {
+            log.info("Invalid sender for transaction {}", transaction.getId());
+            return false;
+        }
 
-        return isLegitimate;
+        if (!personValidator.isValid(transaction.getRecipient())) {
+            log.info("Invalid recipient for transaction {}", transaction.getId());
+            return false;
+        }
+
+        // More expensive checks last
+        if (!accountValidator.isValidSenderAccount(transaction.getSenderAccount(), 
+                transaction.getAmount(), transaction.getSender())) {
+            log.info("Invalid sender account for transaction {}", transaction.getId());
+            return false;
+        }
+
+        if (!accountValidator.isValidRecipientAccount(transaction.getRecipientAccount(), 
+                transaction.getRecipient())) {
+            log.info("Invalid recipient account for transaction {}", transaction.getId());
+            return false;
+        }
+
+        return true;
     }
 }
